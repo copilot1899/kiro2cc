@@ -5,242 +5,193 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
-	"path/filepath"
-	"runtime"
-	"strings"
+	"time"
 )
 
-// TokenData 表示token文件的结构
-type TokenData struct {
-	AccessToken  string `json:"accessToken"`
-	RefreshToken string `json:"refreshToken"`
-	ExpiresAt    string `json:"expiresAt,omitempty"`
+// OpenAI API 结构定义
+type OpenAIMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
 }
 
-// RefreshRequest 刷新token的请求结构
-type RefreshRequest struct {
-	RefreshToken string `json:"refreshToken"`
+type OpenAIRequest struct {
+	Model       string          `json:"model"`
+	Messages    []OpenAIMessage `json:"messages"`
+	MaxTokens   int             `json:"max_tokens,omitempty"`
+	Temperature float64         `json:"temperature,omitempty"`
+	Stream      bool            `json:"stream,omitempty"`
 }
 
-// RefreshResponse 刷新token的响应结构
-type RefreshResponse struct {
-	AccessToken  string `json:"accessToken"`
-	RefreshToken string `json:"refreshToken"`
-	ExpiresAt    string `json:"expiresAt,omitempty"`
+type OpenAIChoice struct {
+	Index   int           `json:"index"`
+	Message OpenAIMessage `json:"message"`
+}
+
+type OpenAIUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
+type OpenAIResponse struct {
+	ID      string        `json:"id"`
+	Object  string        `json:"object"`
+	Created int64         `json:"created"`
+	Model   string        `json:"model"`
+	Choices []OpenAIChoice `json:"choices"`
+	Usage   OpenAIUsage   `json:"usage"`
+}
+
+// Kiro API 结构定义
+type KiroMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type KiroRequest struct {
+	ConversationId string        `json:"conversationId,omitempty"`
+	Messages       []KiroMessage `json:"messages"`
+	Model          string        `json:"model,omitempty"`
+	MaxTokens      int           `json:"maxTokens,omitempty"`
+	Temperature    float64       `json:"temperature,omitempty"`
+	Stream         bool          `json:"stream,omitempty"`
+}
+
+type KiroResponse struct {
+	ConversationId string `json:"conversationId,omitempty"`
+	Message        string `json:"message,omitempty"`
+	Content        string `json:"content,omitempty"`
+	Text           string `json:"text,omitempty"`
+	Model          string `json:"model,omitempty"`
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Println("用法:")
-		fmt.Println("  kiro2cc read    - 读取并显示token")
-		fmt.Println("  kiro2cc refresh - 刷新token")
-		fmt.Println("  kiro2cc export  - 导出环境变量")
-		fmt.Println("  kiro2cc server [port] - 启动Anthropic API代理服务器")
-		os.Exit(1)
+	port := "8080" // 默认端口
+	if len(os.Args) > 1 {
+		port = os.Args[1]
 	}
+	
+	startServer(port)
+}
 
-	command := os.Args[1]
-
-	switch command {
-	case "read":
-		readToken()
-	case "refresh":
-		refreshToken()
-	case "export":
-		exportEnvVars()
-	case "server":
-		port := "8080" // 默认端口
-		if len(os.Args) > 2 {
-			port = os.Args[2]
+// convertOpenAIToKiro 将OpenAI API请求转换为Kiro API请求
+func convertOpenAIToKiro(openaiReq OpenAIRequest) KiroRequest {
+	kiroMessages := make([]KiroMessage, len(openaiReq.Messages))
+	for i, msg := range openaiReq.Messages {
+		kiroMessages[i] = KiroMessage{
+			Role:    msg.Role,
+			Content: msg.Content,
 		}
-		startServer(port)
-	default:
-		fmt.Printf("未知命令: %s\n", command)
-		os.Exit(1)
+	}
+
+	return KiroRequest{
+		ConversationId: fmt.Sprintf("conv_%d", time.Now().UnixNano()),
+		Messages:       kiroMessages,
+		Model:          "claude-sonnet-4-20250514", // 默认使用Claude Sonnet 4
+		MaxTokens:      openaiReq.MaxTokens,
+		Temperature:    openaiReq.Temperature,
 	}
 }
 
-// getTokenFilePath 获取跨平台的token文件路径
-func getTokenFilePath() string {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		fmt.Printf("获取用户目录失败: %v\n", err)
-		os.Exit(1)
+// convertKiroToOpenAI 将Kiro API响应转换为OpenAI API响应
+func convertKiroToOpenAI(kiroResp KiroResponse, originalModel string) OpenAIResponse {
+	// 尝试从不同的字段获取响应内容
+	content := kiroResp.Message
+	if content == "" {
+		content = kiroResp.Content
 	}
-
-	var tokenPath string
-	if runtime.GOOS == "windows" {
-		tokenPath = filepath.Join(homeDir, ".aws", "sso", "cache", "kiro2cc-token.json")
-	} else {
-		tokenPath = filepath.Join(homeDir, ".aws", "sso", "cache", "kiro2cc-token.json")
+	if content == "" {
+		content = kiroResp.Text
 	}
-
-	return tokenPath
-}
-
-// readToken 读取并显示token信息
-func readToken() {
-	tokenPath := getTokenFilePath()
-
-	data, err := os.ReadFile(tokenPath)
-	if err != nil {
-		fmt.Printf("读取token文件失败: %v\n", err)
-		os.Exit(1)
-	}
-
-	var token TokenData
-	if err := json.Unmarshal(data, &token); err != nil {
-		fmt.Printf("解析token文件失败: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Println("Token信息:")
-	fmt.Printf("Access Token: %s\n", token.AccessToken)
-	fmt.Printf("Refresh Token: %s\n", token.RefreshToken)
-	if token.ExpiresAt != "" {
-		fmt.Printf("过期时间: %s\n", token.ExpiresAt)
+	
+	return OpenAIResponse{
+		ID:      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+		Object:  "chat.completion",
+		Created: time.Now().Unix(),
+		Model:   originalModel,
+		Choices: []OpenAIChoice{
+			{
+				Index: 0,
+				Message: OpenAIMessage{
+					Role:    "assistant",
+					Content: content,
+				},
+			},
+		},
+		Usage: OpenAIUsage{
+			PromptTokens:     100, // 估算值，实际应该从Kiro响应中获取
+			CompletionTokens: 200, // 估算值
+			TotalTokens:      300, // 估算值
+		},
 	}
 }
 
-// refreshToken 刷新token
-func refreshToken() {
-	tokenPath := getTokenFilePath()
-
-	// 读取当前token
-	data, err := os.ReadFile(tokenPath)
-	if err != nil {
-		fmt.Printf("读取token文件失败: %v\n", err)
-		os.Exit(1)
-	}
-
-	var currentToken TokenData
-	if err := json.Unmarshal(data, &currentToken); err != nil {
-		fmt.Printf("解析token文件失败: %v\n", err)
-		os.Exit(1)
-	}
-
-	// 准备刷新请求
-	refreshReq := RefreshRequest{
-		RefreshToken: currentToken.RefreshToken,
-	}
-
-	reqBody, err := json.Marshal(refreshReq)
-	if err != nil {
-		fmt.Printf("序列化请求失败: %v\n", err)
-		os.Exit(1)
-	}
-
-	// 发送刷新请求
-	resp, err := http.Post(
-		"https://prod.us-east-1.auth.desktop.kiro.dev/refreshToken",
-		"application/json",
-		bytes.NewBuffer(reqBody),
-	)
-	if err != nil {
-		fmt.Printf("刷新token请求失败: %v\n", err)
-		os.Exit(1)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		fmt.Printf("刷新token失败，状态码: %d, 响应: %s\n", resp.StatusCode, string(body))
-		os.Exit(1)
-	}
-
-	// 解析响应
-	var refreshResp RefreshResponse
-	if err := json.NewDecoder(resp.Body).Decode(&refreshResp); err != nil {
-		fmt.Printf("解析刷新响应失败: %v\n", err)
-		os.Exit(1)
-	}
-
-	// 更新token文件
-	newToken := TokenData{
-		AccessToken:  refreshResp.AccessToken,
-		RefreshToken: refreshResp.RefreshToken,
-		ExpiresAt:    refreshResp.ExpiresAt,
-	}
-
-	newData, err := json.MarshalIndent(newToken, "", "  ")
-	if err != nil {
-		fmt.Printf("序列化新token失败: %v\n", err)
-		os.Exit(1)
-	}
-
-	if err := os.WriteFile(tokenPath, newData, 0600); err != nil {
-		fmt.Printf("写入token文件失败: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Println("Token刷新成功!")
-	fmt.Printf("新的Access Token: %s\n", newToken.AccessToken)
-}
-
-// exportEnvVars 导出环境变量
-func exportEnvVars() {
-	tokenPath := getTokenFilePath()
-
-	data, err := os.ReadFile(tokenPath)
-	if err != nil {
-		fmt.Printf("读取token文件失败: %v\n", err)
-		os.Exit(1)
-	}
-
-	var token TokenData
-	if err := json.Unmarshal(data, &token); err != nil {
-		fmt.Printf("解析token文件失败: %v\n", err)
-		os.Exit(1)
-	}
-
-	// 根据操作系统输出不同格式的环境变量设置命令
-	if runtime.GOOS == "windows" {
-		fmt.Printf("set ANTHROPIC_BASE_URL=https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse\n")
-		fmt.Printf("set ANTHROPIC_API_KEY=%s\n", token.AccessToken)
-	} else {
-		fmt.Printf("export ANTHROPIC_BASE_URL=\"https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse\"\n")
-		fmt.Printf("export ANTHROPIC_API_KEY=\"%s\"\n", token.AccessToken)
-	}
-}
-
-// getToken 获取当前token
-func getToken() (TokenData, error) {
-	tokenPath := getTokenFilePath()
-
-	data, err := os.ReadFile(tokenPath)
-	if err != nil {
-		return TokenData{}, fmt.Errorf("读取token文件失败: %v", err)
-	}
-
-	var token TokenData
-	if err := json.Unmarshal(data, &token); err != nil {
-		return TokenData{}, fmt.Errorf("解析token文件失败: %v", err)
-	}
-
-	return token, nil
-}
-
-// startServer 启动HTTP代理服务器
+// startServer 启动OpenAI API兼容的代理服务器
 func startServer(port string) {
-	// 创建代理处理器
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// 只处理POST请求
+	// 设置CORS中间件
+	corsHandler := func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			
+			if r.Method == "OPTIONS" {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			
+			next(w, r)
+		}
+	}
+
+	// OpenAI API兼容的聊天完成端点
+	http.HandleFunc("/v1/chat/completions", corsHandler(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "只支持POST请求", http.StatusMethodNotAllowed)
 			return
 		}
 
-		// 获取当前token
-		token, err := getToken()
-		if err != nil {
-			http.Error(w, fmt.Sprintf("获取token失败: %v", err), http.StatusInternalServerError)
+		// 从Authorization头中提取accessToken
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" {
+			errorMsg := map[string]interface{}{
+				"error": map[string]interface{}{
+					"message": "缺少Authorization头。请在OpenAI客户端的api_key参数中设置你的Kiro access token。",
+					"type":    "authentication_error",
+					"code":    "missing_authorization",
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(errorMsg)
 			return
 		}
 
-		// 读取请求体
+		// 提取Bearer token
+		accessToken := ""
+		if len(authHeader) > 7 && authHeader[:7] == "Bearer " {
+			accessToken = authHeader[7:]
+		} else {
+			accessToken = authHeader
+		}
+
+		if accessToken == "" {
+			errorMsg := map[string]interface{}{
+				"error": map[string]interface{}{
+					"message": "无效的Authorization头格式。请确保在OpenAI客户端的api_key参数中设置了有效的Kiro access token。",
+					"type":    "authentication_error",
+					"code":    "invalid_authorization_format",
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(errorMsg)
+			return
+		}
+
+		// 读取OpenAI API请求
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("读取请求体失败: %v", err), http.StatusInternalServerError)
@@ -248,69 +199,128 @@ func startServer(port string) {
 		}
 		defer r.Body.Close()
 
-		// 创建转发请求
-		proxyReq, err := http.NewRequest(
-			http.MethodPost,
-			"https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse",
-			bytes.NewBuffer(body),
-		)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("创建代理请求失败: %v", err), http.StatusInternalServerError)
+		var openaiReq OpenAIRequest
+		if err := json.Unmarshal(body, &openaiReq); err != nil {
+			http.Error(w, fmt.Sprintf("解析OpenAI请求失败: %v", err), http.StatusBadRequest)
 			return
 		}
 
-		// 复制原始请求的header
-		for name, values := range r.Header {
-			// 跳过Host和Authorization头
-			if strings.EqualFold(name, "Host") || strings.EqualFold(name, "Authorization") {
-				continue
-			}
-			for _, value := range values {
-				proxyReq.Header.Add(name, value)
-			}
+		// 转换为Kiro API请求
+		kiroReq := convertOpenAIToKiro(openaiReq)
+		
+		// 序列化Kiro请求
+		kiroReqBody, err := json.Marshal(kiroReq)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("序列化Kiro请求失败: %v", err), http.StatusInternalServerError)
+			return
 		}
 
-		// 设置Authorization头
-		proxyReq.Header.Set("Authorization", "Bearer "+token.AccessToken)
+		// 创建到Kiro API的请求
+		proxyReq, err := http.NewRequest(
+			http.MethodPost,
+			"https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse",
+			bytes.NewBuffer(kiroReqBody),
+		)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("创建Kiro请求失败: %v", err), http.StatusInternalServerError)
+			return
+		}
 
-		// 发送请求
+		// 设置请求头
+		proxyReq.Header.Set("Content-Type", "application/json")
+		proxyReq.Header.Set("Authorization", "Bearer "+accessToken)
+		proxyReq.Header.Set("User-Agent", "Kiro2API/1.0")
+		proxyReq.Header.Set("Accept", "application/json")
+		proxyReq.Header.Set("X-Amz-Target", "CodeWhispererService.GenerateAssistantResponse")
+
+		// 发送请求到Kiro API
 		client := &http.Client{}
 		resp, err := client.Do(proxyReq)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("发送代理请求失败: %v", err), http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf("发送Kiro请求失败: %v", err), http.StatusInternalServerError)
 			return
 		}
 		defer resp.Body.Close()
 
-		// 复制响应头
-		for name, values := range resp.Header {
-			for _, value := range values {
-				w.Header().Add(name, value)
-			}
-		}
-
-		// 设置状态码
-		w.WriteHeader(resp.StatusCode)
-
-		// 复制响应体
-		_, err = io.Copy(w, resp.Body)
+		// 读取Kiro响应
+		kiroRespBody, err := io.ReadAll(resp.Body)
 		if err != nil {
-			log.Printf("复制响应体失败: %v", err)
+			http.Error(w, fmt.Sprintf("读取Kiro响应失败: %v", err), http.StatusInternalServerError)
+			return
 		}
-	})
 
-	// 添加健康检查端点
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		if resp.StatusCode != http.StatusOK {
+			// 如果是认证错误，提供更有用的错误信息
+			if resp.StatusCode == 403 || resp.StatusCode == 401 {
+				errorMsg := map[string]interface{}{
+					"error": map[string]interface{}{
+						"message": "认证失败。请检查api_key中的Kiro access token是否正确且未过期。",
+						"type":    "authentication_error",
+						"code":    "invalid_token",
+						"details": "请从Kiro IDE中获取最新的access token，并在OpenAI客户端的api_key参数中使用它。",
+					},
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				json.NewEncoder(w).Encode(errorMsg)
+				return
+			}
+			
+			http.Error(w, fmt.Sprintf("Kiro API错误，状态码: %d", resp.StatusCode), resp.StatusCode)
+			return
+		}
+
+		var kiroResp KiroResponse
+		if err := json.Unmarshal(kiroRespBody, &kiroResp); err != nil {
+			http.Error(w, fmt.Sprintf("解析Kiro响应失败: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		// 转换为OpenAI API响应
+		openaiResp := convertKiroToOpenAI(kiroResp, openaiReq.Model)
+
+		// 返回OpenAI API格式的响应
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(openaiResp)
+	}))
+
+	// 健康检查端点
+	http.HandleFunc("/health", corsHandler(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
-	})
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	}))
+
+	// 模型列表端点（OpenAI API兼容）
+	http.HandleFunc("/v1/models", corsHandler(func(w http.ResponseWriter, r *http.Request) {
+		models := map[string]interface{}{
+			"object": "list",
+			"data": []map[string]interface{}{
+				{
+					"id":      "claude-sonnet-4-20250514",
+					"object":  "model",
+					"created": time.Now().Unix(),
+					"owned_by": "kiro",
+				},
+				{
+					"id":      "claude-3-7-sonnet-20250219",
+					"object":  "model", 
+					"created": time.Now().Unix(),
+					"owned_by": "kiro",
+				},
+			},
+		}
+		
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(models)
+	}))
 
 	// 启动服务器
-	fmt.Printf("启动Anthropic API代理服务器，监听端口: %s\n", port)
-	fmt.Printf("可以通过 http://localhost:%s 访问代理服务\n", port)
-	fmt.Printf("按Ctrl+C停止服务器\n")
+	fmt.Printf("Kiro2API 代理服务器启动，端口: %s\n", port)
+	fmt.Printf("OpenAI API 端点: http://localhost:%s/v1/chat/completions\n", port)
+	fmt.Printf("使用方法: 在 OpenAI 客户端的 api_key 中设置你的 Kiro access token\n")
 
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
+	if err := http.ListenAndServe("0.0.0.0:"+port, nil); err != nil {
 		fmt.Printf("启动服务器失败: %v\n", err)
 		os.Exit(1)
 	}

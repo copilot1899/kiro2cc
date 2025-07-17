@@ -1,1 +1,21 @@
+# 编译后的二进制文件
+kiro2api
 *.exe
+
+# 日志文件
+*.log
+
+# 临时文件
+*.tmp
+*.temp
+
+# IDE文件
+.vscode/
+.idea/
+
+# 操作系统生成的文件
+.DS_Store
+Thumbs.db
+
+# Docker相关
+.dockerignore
