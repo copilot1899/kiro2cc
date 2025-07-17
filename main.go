@@ -10,6 +10,122 @@ import (
 	"time"
 )
 
+// min 返回两个整数中的较小值
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// tryMultipleFormats 尝试多种请求格式和认证方式
+func tryMultipleFormats(openaiReq OpenAIRequest, accessToken string) (bool, *http.Response) {
+	// 准备不同的请求体格式
+	formats := []interface{}{
+		// 格式1: 原始Kiro格式
+		convertOpenAIToKiro(openaiReq),
+		
+		// 格式2: Claude Code格式
+		ClaudeCodeRequest{
+			Messages:    convertMessages(openaiReq.Messages),
+			Model:       openaiReq.Model,
+			MaxTokens:   openaiReq.MaxTokens,
+			Temperature: openaiReq.Temperature,
+		},
+		
+		// 格式3: 简化格式，只有input
+		map[string]interface{}{
+			"input":      getLastUserMessage(openaiReq.Messages),
+			"model":      openaiReq.Model,
+			"maxTokens":  openaiReq.MaxTokens,
+		},
+		
+		// 格式4: Anthropic Messages API格式
+		map[string]interface{}{
+			"messages":    convertMessages(openaiReq.Messages),
+			"model":       openaiReq.Model,
+			"max_tokens":  openaiReq.MaxTokens,
+			"temperature": openaiReq.Temperature,
+		},
+	}
+	
+	// 不同的认证方式
+	authMethods := []string{
+		"Bearer " + accessToken,
+		accessToken,
+	}
+	
+	// 不同的Content-Type
+	contentTypes := []string{
+		"application/json",
+		"application/x-amz-json-1.1",
+	}
+	
+	client := &http.Client{Timeout: 10 * time.Second}
+	
+	for _, format := range formats {
+		for _, auth := range authMethods {
+			for _, contentType := range contentTypes {
+				reqBody, err := json.Marshal(format)
+				if err != nil {
+					continue
+				}
+				
+				req, err := http.NewRequest(
+					http.MethodPost,
+					"https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse",
+					bytes.NewBuffer(reqBody),
+				)
+				if err != nil {
+					continue
+				}
+				
+				// 设置请求头
+				req.Header.Set("Content-Type", contentType)
+				req.Header.Set("Authorization", auth)
+				req.Header.Set("User-Agent", "Kiro2API/1.0")
+				req.Header.Set("Accept", "application/json")
+				req.Header.Set("X-Amz-Target", "CodeWhispererService.GenerateAssistantResponse")
+				req.Header.Set("X-Amz-Date", time.Now().UTC().Format("20060102T150405Z"))
+				
+				resp, err := client.Do(req)
+				if err != nil {
+					continue
+				}
+				
+				if resp.StatusCode == http.StatusOK {
+					return true, resp
+				}
+				resp.Body.Close()
+			}
+		}
+	}
+	
+	return false, nil
+}
+
+// convertMessages 转换消息格式
+func convertMessages(messages []OpenAIMessage) []KiroMessage {
+	kiroMessages := make([]KiroMessage, len(messages))
+	for i, msg := range messages {
+		kiroMessages[i] = KiroMessage{
+			Role:    msg.Role,
+			Content: msg.Content,
+		}
+	}
+	return kiroMessages
+}
+
+// getLastUserMessage 获取最后一条用户消息
+func getLastUserMessage(messages []OpenAIMessage) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			return messages[i].Content
+		}
+	}
+	return ""
+}
+
 // OpenAI API 结构定义
 type OpenAIMessage struct {
 	Role    string `json:"role"`
@@ -57,6 +173,15 @@ type KiroRequest struct {
 	MaxTokens      int           `json:"maxTokens,omitempty"`
 	Temperature    float64       `json:"temperature,omitempty"`
 	Stream         bool          `json:"stream,omitempty"`
+}
+
+// 尝试不同的请求格式
+type ClaudeCodeRequest struct {
+	Input       string        `json:"input,omitempty"`
+	Messages    []KiroMessage `json:"messages,omitempty"`
+	Model       string        `json:"model,omitempty"`
+	MaxTokens   int           `json:"max_tokens,omitempty"`
+	Temperature float64       `json:"temperature,omitempty"`
 }
 
 type KiroResponse struct {
@@ -177,6 +302,8 @@ func startServer(port string) {
 			accessToken = authHeader
 		}
 
+
+
 		if accessToken == "" {
 			errorMsg := map[string]interface{}{
 				"error": map[string]interface{}{
@@ -205,42 +332,26 @@ func startServer(port string) {
 			return
 		}
 
-		// 转换为Kiro API请求
-		kiroReq := convertOpenAIToKiro(openaiReq)
-		
-		// 序列化Kiro请求
-		kiroReqBody, err := json.Marshal(kiroReq)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("序列化Kiro请求失败: %v", err), http.StatusInternalServerError)
+		// 尝试多种请求格式
+		success, response := tryMultipleFormats(openaiReq, accessToken)
+		if !success {
+			// 如果所有格式都失败，返回认证错误
+			errorMsg := map[string]interface{}{
+				"error": map[string]interface{}{
+					"message": "认证失败。请检查api_key中的Kiro access token是否正确且未过期。",
+					"type":    "authentication_error",
+					"code":    "invalid_token",
+					"details": "请从Kiro IDE中获取最新的access token，并在OpenAI客户端的api_key参数中使用它。",
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(errorMsg)
 			return
 		}
 
-		// 创建到Kiro API的请求
-		proxyReq, err := http.NewRequest(
-			http.MethodPost,
-			"https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse",
-			bytes.NewBuffer(kiroReqBody),
-		)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("创建Kiro请求失败: %v", err), http.StatusInternalServerError)
-			return
-		}
-
-		// 设置请求头
-		proxyReq.Header.Set("Content-Type", "application/json")
-		proxyReq.Header.Set("Authorization", "Bearer "+accessToken)
-		proxyReq.Header.Set("User-Agent", "Kiro2API/1.0")
-		proxyReq.Header.Set("Accept", "application/json")
-		proxyReq.Header.Set("X-Amz-Target", "CodeWhispererService.GenerateAssistantResponse")
-
-		// 发送请求到Kiro API
-		client := &http.Client{}
-		resp, err := client.Do(proxyReq)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("发送Kiro请求失败: %v", err), http.StatusInternalServerError)
-			return
-		}
-		defer resp.Body.Close()
+		// 使用成功的响应
+		resp := response
 
 		// 读取Kiro响应
 		kiroRespBody, err := io.ReadAll(resp.Body)

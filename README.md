@@ -178,11 +178,31 @@ console.log(data.choices[0].message.content);
 
 ## 故障排除
 
+### 常见问题
+
 如果遇到认证错误，请检查：
 1. 是否在OpenAI客户端的api_key参数中正确设置了Kiro access token
 2. Access token是否已过期
 3. 网络连接是否正常
 4. Authorization头格式是否正确 (Bearer your-token)
+
+### 已知问题
+
+⚠️ **当前状态**：项目代码已完成，但存在以下认证问题需要解决：
+
+1. **Token认证失败**：
+   - 错误信息："The bearer token included in the request is invalid"
+   - 或者："User is not authorized to make this call"
+
+2. **可能的原因**：
+   - CodeWhisperer API端点可能需要特殊的AWS权限或签名
+   - Token可能需要特定的权限范围
+   - API端点 `https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse` 可能不正确
+
+3. **建议解决方案**：
+   - 验证从Kiro IDE获取的token是否有调用此API的权限
+   - 检查是否需要使用不同的API端点
+   - 确认token是否需要额外的AWS签名处理
 
 ## 项目文件
 
